@@ -49,9 +49,9 @@ public class Bot extends TelegramLongPollingBot {
 
     private static final String DESCRIPTION = """
             <b>Чат-бот для поиска реактивов по базе данных реактивов Баранова М.С.</b>
-            
+                        
             Бот работает в <b>двух</b> режимах:
-            
+                        
             <b>1.</b> Текстовый поиск реактива. Для этого отправьте боту сообщение с текстом. Поиск осуществляется по непрерывной последовательности 
             заданных символов в базе данных по трем столбцам: name, alternative_name, another_name. Например, по сообщению "benzene" будут найдены:
             "benzene", "fluorobenzene", "benzene-d6".
@@ -61,10 +61,11 @@ public class Bot extends TelegramLongPollingBot {
             расширениями в данный момент являются только <b>*.jpeg</b> и <b>*.png</b>. Распознавание будет тем лучше, чем выше качество изображения,
             чем меньше фоновые шумы и другие элементы, расположенные на картинках, пересылаемых боту. Фича работает в тестовом режиме, 
             поэтому может допускать ошибки. Датасет можно найти <a href="https://disk.yandex.ru/d/1jOjfDepSZ-E8Q">здесь</a>.
-            
+                        
             Это закрытый бот; для получения доступа напишите @tony_chem.
                
             """;
+
     public Bot(BotConfigurator config, ReagentRepository reagentRepository, UserRepository userRepository, ChemicalVision vision) throws TelegramApiException {
         this.config = config;
         this.reagentRepository = reagentRepository;
@@ -79,14 +80,17 @@ public class Bot extends TelegramLongPollingBot {
         if (update.hasMessage()) {
             Message message = update.getMessage();
 
-            if (message.getText().equals("/description")) {
-                SendMessage sendMessage = new SendMessage();
-                sendMessage.setChatId(update.getMessage().getChatId());
-                sendMessage.setText(DESCRIPTION);
-                sendMessage.setParseMode(ParseMode.HTML);
-                execute(sendMessage);
-                return;
+            if (message.hasText()) {
+                if (message.getText().equals("/description")) {
+                    SendMessage sendMessage = new SendMessage();
+                    sendMessage.setChatId(update.getMessage().getChatId());
+                    sendMessage.setText(DESCRIPTION);
+                    sendMessage.setParseMode(ParseMode.HTML);
+                    execute(sendMessage);
+                    return;
+                }
             }
+
 
             if (userRepository.existsByChatId(message.getChatId()) && userRepository.getAcceptedByChatId(message.getChatId())) {
                 List<SendMessage> sendMessageList = handleIncomingMessage(message.getChatId(), message);
@@ -103,6 +107,8 @@ public class Bot extends TelegramLongPollingBot {
                 saveNewUser(message);
                 execute(prepareSendMessage(message.getChatId(), List.of("Закрытый бот. Пишите @tony_chem для получения доступа."), null));
             }
+
+
         } else if (update.hasCallbackQuery()) {
             EditMessageText text = handleCallBackQuery(update.getCallbackQuery());
             execute(text);
