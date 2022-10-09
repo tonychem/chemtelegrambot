@@ -8,23 +8,27 @@ import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.ParseMode;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.*;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
-import ru.chemicalbase.utils.ChemicalVision;
 import ru.chemicalbase.config.BotConfigurator;
 import ru.chemicalbase.exception.InvalidFileIdException;
 import ru.chemicalbase.exception.UnrecognizedRequestException;
 import ru.chemicalbase.exception.UnsupportedFileExtensionException;
 import ru.chemicalbase.repository.reagent.Reagent;
 import ru.chemicalbase.repository.reagent.ReagentRepository;
-import ru.chemicalbase.repository.user.UserRepository;
 import ru.chemicalbase.repository.user.User;
+import ru.chemicalbase.repository.user.UserRepository;
+import ru.chemicalbase.utils.ChemicalVision;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static ru.chemicalbase.utils.Math.incrementIfContainsRemainder;
 
 @Service
 @RequiredArgsConstructor
@@ -33,10 +37,15 @@ public class Bot extends TelegramLongPollingBot {
     private final ReagentRepository reagentRepository;
     private final UserRepository userRepository;
     private final ChemicalVision vision;
-    private static final String REAGENT_INFO_MESSAGE_ONE_NAME = "<b>%s</b>\nШкаф %s, полка: %s";
-    private static final String REAGENT_INFO_MESSAGE_TWO_NAMES = "<b>%s%s</b>\nШкаф %s, полка: %s";
-    private static final String REAGENT_INFO_MESSAGE_THREE_NAMES = "<b>%s%s%s</b>\nШкаф %s, полка: %s";
+    //В таблицу сохраняется последний результат поиска пользователя
+    private final Map<Long, List<Reagent>> userSearchResultCache = new ConcurrentHashMap<>();
 
+    //В таблицу сохраняется последняя просмотренная страница с разметкой html
+    private final Map<Long, List<String>> userLastViewedPageCache = new ConcurrentHashMap<>();
+    private static final int REAGENTS_ON_PAGE = 5;
+    private static final int MAX_INLINEKEYBOARD_BUTTONS_IN_ROW = 5;
+    private static final String REAGENT_INFO_MESSAGE_ONE_NAME = "<b>➤%s</b>\nКомната: <b>%s</b>, " +
+            "Шкаф: <b>%s</b>, полка: <b>%s</b>";
 
     @SneakyThrows
     @Override
@@ -46,23 +55,59 @@ public class Bot extends TelegramLongPollingBot {
             if (userRepository.existsByChatId(message.getChatId()) && userRepository.getAcceptedByChatId(message.getChatId())) {
                 List<SendMessage> sendMessageList = handleIncomingMessage(message.getChatId(), message);
 
+                if (sendMessageList.isEmpty()) {
+                    execute(prepareSendMessage(message.getChatId(), List.of("Реактив не найден."), null));
+                    return;
+                }
+
                 for (SendMessage s : sendMessageList) {
-                    try {
-                        execute(s);
-                    } catch (TelegramApiException e) {
-                        throw new RuntimeException(e);
-                    }
+                    execute(s);
                 }
             } else {
-                User user = new User();
-                user.setChatId(message.getChatId());
-                user.setName(message.getChat().getFirstName());
-                user.setAccepted(false);
-                userRepository.save(user);
-
-                execute(prepareSendMessage(message.getChatId(), "Закрытый бот. Пишите @tony_chem для получения доступа."));
+                saveNewUser(message);
+                execute(prepareSendMessage(message.getChatId(),
+                        List.of("Закрытый бот. Пишите @tony_chem для получения доступа."), null));
             }
+        } else if (update.hasCallbackQuery()) {
+            EditMessageText text = handleCallBackQuery(update.getCallbackQuery());
+            execute(text);
         }
+    }
+
+    private EditMessageText handleCallBackQuery(CallbackQuery query) {
+        EditMessageText editMessageText = new EditMessageText();
+
+        int messageId = query.getMessage().getMessageId();
+        long chatId = query.getMessage().getChatId();
+        String buttonData = query.getData();
+
+        //Извлекаем, какой последний запрос делал пользователь
+        List<Reagent> userQueryResultList = userSearchResultCache.get(chatId);
+
+        editMessageText.setChatId(chatId);
+        editMessageText.setMessageId(messageId);
+        editMessageText.setParseMode(ParseMode.HTML);
+
+        if (buttonData.equals("MORE")) {
+            //При нажатии на кнопку "..." извлекаем последнюю просмотренный список реактивов в виде
+            //списка строк. Нужно для сохранения разметки сообщений, отправляемых пользователю.
+            String text = String.join("\n\n", userLastViewedPageCache.get(chatId));
+            editMessageText.setText(text);
+            editMessageText.setReplyMarkup(generateInlineKeyBoardMarkup(userQueryResultList.size(), true));
+        } else {
+            //Парсим номер запрашиваемой страницы, преобразуем paginated-список реактивов в список форматированных строк
+            int page = Integer.parseInt(buttonData);
+            List<String> reagentInfo = new ArrayList<>();
+
+            for (Reagent r : paginate(userQueryResultList, REAGENTS_ON_PAGE, page)) {
+                reagentInfo.add(String.format(REAGENT_INFO_MESSAGE_ONE_NAME, r.getName(), r.getRoom(),
+                        r.getShed(), r.getShelf()));
+            }
+
+            editMessageText.setText(String.join("\n\n", reagentInfo));
+            editMessageText.setReplyMarkup(generateInlineKeyBoardMarkup(userQueryResultList.size(), false));
+        }
+        return editMessageText;
     }
 
     private List<SendMessage> handleIncomingMessage(long chatId, Message message)
@@ -72,7 +117,7 @@ public class Bot extends TelegramLongPollingBot {
         List<SendMessage> sendMessageList = new ArrayList<>();
         List<Reagent> foundReagents;
 
-        //определить, что делать с входящим сообщением
+        //Определить, что делать с входящим сообщением
         if (message.hasPhoto()) {
             java.io.File savedFile = saveImageFromPicture(message);
             foundReagents = arrangeReagentListFromMoleculeFile(savedFile);
@@ -86,20 +131,42 @@ public class Bot extends TelegramLongPollingBot {
             throw new UnrecognizedRequestException("Неизвестный запрос.");
         }
 
-        //подготовить список SendMessage
-        for (Reagent r : foundReagents) {
-            sendMessageList.add(prepareSendMessage(chatId, String.format(REAGENT_INFO_MESSAGE_ONE_NAME, r.getName(),
-                    r.getShed(), r.getShelf())));
+        //Если список реактивов пуст, возвращаем пустой список
+        if (foundReagents.isEmpty()) {
+            return Collections.emptyList();
+
         }
 
+        //добавить поиск пользователя в кэш, чтобы можно было обрабатывать правильно клавиатуру
+        userSearchResultCache.put(chatId, foundReagents);
+
+        //подготовить список SendMessage
+        List<String> messagesList = new ArrayList<>();
+
+        //подготавливаем список строк с реактивами
+        for (Reagent r : paginate(foundReagents, REAGENTS_ON_PAGE, 1)) {
+            String messageText = String.format(REAGENT_INFO_MESSAGE_ONE_NAME, r.getName(), r.getRoom(),
+                    r.getShed(), r.getShelf());
+            messagesList.add(messageText);
+        }
+
+        //этот же список сохраняем за пользователем, чтобы далее можно было парсить кнопку "..."
+        userLastViewedPageCache.put(chatId, messagesList);
+
+        InlineKeyboardMarkup markup = generateInlineKeyBoardMarkup(foundReagents.size(), false);
+
+        sendMessageList.add(prepareSendMessage(chatId, messagesList, markup));
         return sendMessageList;
     }
 
-    private SendMessage prepareSendMessage(long chatId, String messageText) {
+    private SendMessage prepareSendMessage(long chatId, List<String> messages, InlineKeyboardMarkup markup) {
         SendMessage message = new SendMessage();
         message.setChatId(chatId);
         message.setParseMode(ParseMode.HTML);
-        message.setText(messageText);
+        message.setReplyMarkup(markup);
+
+        String text = String.join("\n\n", messages);
+        message.setText(text);
         return message;
     }
 
@@ -166,6 +233,87 @@ public class Bot extends TelegramLongPollingBot {
         }
 
         return foundReagents;
+    }
+
+    private void saveNewUser(Message message) {
+        User user = new User();
+        user.setChatId(message.getChatId());
+        user.setName(message.getChat().getFirstName());
+        user.setAccepted(false);
+        userRepository.save(user);
+    }
+
+    //Возвращает инлайн клавитуру для сообщения. Анализирует размер списка реактивов listSize.
+    //Создает клавиатуру, из любого количества рядов, в ряду - количество кнопок составляет MAX_INLINEKEYBOARD_BUTTONS_IN_ROW
+    //Если флаг false - возвращает клавиатуру из одного ряда с кнопками 1, 2, .., MAX_INLINEKEYBOARD_BUTTONS_IN_ROW.
+    //Если флаг true - возвращает клавиатуру, покрывающую полностью все страницы.
+    private InlineKeyboardMarkup generateInlineKeyBoardMarkup(int listSize, boolean printAll) {
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        int numberOfButtons = incrementIfContainsRemainder(listSize, MAX_INLINEKEYBOARD_BUTTONS_IN_ROW);
+        int numberOfRows = incrementIfContainsRemainder(numberOfButtons, MAX_INLINEKEYBOARD_BUTTONS_IN_ROW);
+
+        if (numberOfButtons < 2) {
+            return null;
+        }
+
+        if (printAll) {
+            //создаем ряды
+            for (int i = 1; i < numberOfRows + 1; i++) {
+                List<InlineKeyboardButton> row;
+
+                if (i == numberOfRows) {
+                    row = prepareInlineKeyboardRow(MAX_INLINEKEYBOARD_BUTTONS_IN_ROW * (i - 1) + 1,
+                            numberOfButtons);
+                } else {
+                    row =
+                            prepareInlineKeyboardRow(MAX_INLINEKEYBOARD_BUTTONS_IN_ROW * (i - 1) + 1,
+                                    i * MAX_INLINEKEYBOARD_BUTTONS_IN_ROW);
+                }
+                rows.add(row);
+            }
+        } else {
+            if (numberOfButtons < MAX_INLINEKEYBOARD_BUTTONS_IN_ROW) {
+                List<InlineKeyboardButton> row = prepareInlineKeyboardRow(1, numberOfButtons);
+                rows.add(row);
+            } else {
+                List<InlineKeyboardButton> row = prepareInlineKeyboardRow(1, MAX_INLINEKEYBOARD_BUTTONS_IN_ROW - 1);
+                InlineKeyboardButton button = new InlineKeyboardButton();
+                button.setText("...");
+                button.setCallbackData("MORE");
+                row.add(button);
+
+                rows.add(row);
+            }
+        }
+
+        markup.setKeyboard(rows);
+        return markup;
+    }
+
+    //Разбивает заданный список реактивов на страницы. reagentsOnPage - количество реактивов на странице,
+    //pageNumber - номер страницы
+    private List<Reagent> paginate(List<Reagent> reagentList, int reagentsOnPage, int pageNumber) {
+        List<Reagent> paginatedList = new ArrayList<>();
+
+        for (int i = 0, j = reagentsOnPage * (pageNumber - 1); i < reagentsOnPage && (j + i) < reagentList.size(); i++) {
+            paginatedList.add(reagentList.get(j + i));
+        }
+
+        return paginatedList;
+    }
+
+    //подготавливает ряд кнопок от start до endInclusive включительно. Текст - число, data - соответствующее число
+    private List<InlineKeyboardButton> prepareInlineKeyboardRow(int start, int endInclusive) {
+        List<InlineKeyboardButton> row = new ArrayList<>();
+        for (int j = start; j < endInclusive + 1; j++) {
+            InlineKeyboardButton button = new InlineKeyboardButton();
+            button.setText(String.valueOf(j));
+            button.setCallbackData(String.valueOf(j));
+            row.add(button);
+        }
+        return row;
     }
 
     @Override
