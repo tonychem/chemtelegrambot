@@ -1,4 +1,4 @@
-package ru.chemicalbase.repository;
+package ru.chemicalbase.repository.reagent;
 
 import lombok.Data;
 import lombok.NoArgsConstructor;

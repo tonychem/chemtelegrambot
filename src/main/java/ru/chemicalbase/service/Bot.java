@@ -10,14 +10,15 @@ import org.telegram.telegrambots.meta.api.methods.ParseMode;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.*;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
-import ru.chemicalbase.Utils.ChemicalVision;
+import ru.chemicalbase.utils.ChemicalVision;
 import ru.chemicalbase.config.BotConfigurator;
 import ru.chemicalbase.exception.InvalidFileIdException;
 import ru.chemicalbase.exception.UnrecognizedRequestException;
 import ru.chemicalbase.exception.UnsupportedFileExtensionException;
-import ru.chemicalbase.repository.Reagent;
-import ru.chemicalbase.repository.ReagentRepository;
-import ru.chemicalbase.repository.UserRepository;
+import ru.chemicalbase.repository.reagent.Reagent;
+import ru.chemicalbase.repository.reagent.ReagentRepository;
+import ru.chemicalbase.repository.user.UserRepository;
+import ru.chemicalbase.repository.user.User;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -53,7 +54,7 @@ public class Bot extends TelegramLongPollingBot {
                     }
                 }
             } else {
-                ru.chemicalbase.repository.User user = new ru.chemicalbase.repository.User();
+                User user = new User();
                 user.setChatId(message.getChatId());
                 user.setName(message.getChat().getFirstName());
                 user.setAccepted(false);

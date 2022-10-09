@@ -1,4 +1,4 @@
-package ru.chemicalbase.Utils;
+package ru.chemicalbase.utils;
 
 import com.epam.indigo.Indigo;
 import com.epam.indigo.IndigoObject;

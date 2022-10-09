@@ -1,4 +1,4 @@
-package ru.chemicalbase.repository;
+package ru.chemicalbase.repository.user;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
