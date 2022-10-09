@@ -1,15 +1,17 @@
 package ru.chemicalbase.service;
 
 import com.epam.indigo.IndigoException;
-import lombok.RequiredArgsConstructor;
 import lombok.SneakyThrows;
 import org.springframework.stereotype.Service;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.ParseMode;
+import org.telegram.telegrambots.meta.api.methods.commands.SetMyCommands;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.*;
+import org.telegram.telegrambots.meta.api.objects.commands.BotCommand;
+import org.telegram.telegrambots.meta.api.objects.commands.scope.BotCommandScopeDefault;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
@@ -31,7 +33,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import static ru.chemicalbase.utils.Math.incrementIfContainsRemainder;
 
 @Service
-@RequiredArgsConstructor
 public class Bot extends TelegramLongPollingBot {
     private final BotConfigurator config;
     private final ReagentRepository reagentRepository;
@@ -44,14 +45,49 @@ public class Bot extends TelegramLongPollingBot {
     private final Map<Long, List<String>> userLastViewedPageCache = new ConcurrentHashMap<>();
     private static final int REAGENTS_ON_PAGE = 5;
     private static final int MAX_INLINEKEYBOARD_BUTTONS_IN_ROW = 5;
-    private static final String REAGENT_INFO_MESSAGE_ONE_NAME = "<b>➤%s</b>\nКомната: <b>%s</b>, " +
-            "Шкаф: <b>%s</b>, полка: <b>%s</b>";
+    private static final String REAGENT_INFO_MESSAGE_ONE_NAME = "<b>➤%s</b>\nКомната: <b>%s</b>, " + "Шкаф: <b>%s</b>, полка: <b>%s</b>";
+
+    private static final String DESCRIPTION = """
+            <b>Чат-бот для поиска реактивов по базе данных реактивов Баранова М.С.</b>
+            
+            Бот работает в <b>двух</b> режимах:
+            
+            <b>1.</b> Текстовый поиск реактива. Для этого отправьте боту сообщение с текстом. Поиск осуществляется по непрерывной последовательности 
+            заданных символов в базе данных по трем столбцам: name, alternative_name, another_name. Например, по сообщению "benzene" будут найдены:
+            "benzene", "fluorobenzene", "benzene-d6".
+             
+            <b>2.</b> Распознавание изображений, содержащих структурные формулы (alpha). Для этого нужно отправить боту сообщение с прикрепленной
+            фотографией или файлом с пустым телом сообщения (без текста). Если изображение отправляется посредством файла, то поддерживаемыми
+            расширениями в данный момент являются только <b>*.jpeg</b> и <b>*.png</b>. Распознавание будет тем лучше, чем выше качество изображения,
+            чем меньше фоновые шумы и другие элементы, расположенные на картинках, пересылаемых боту. Фича работает в тестовом режиме, 
+            поэтому может допускать ошибки. Датасет можно найти <a href="https://disk.yandex.ru/d/1jOjfDepSZ-E8Q">здесь</a>.
+            
+            Это закрытый бот; для получения доступа напишите @tony_chem.
+               
+            """;
+    public Bot(BotConfigurator config, ReagentRepository reagentRepository, UserRepository userRepository, ChemicalVision vision) throws TelegramApiException {
+        this.config = config;
+        this.reagentRepository = reagentRepository;
+        this.userRepository = userRepository;
+        this.vision = vision;
+        setCommands();
+    }
 
     @SneakyThrows
     @Override
     public void onUpdateReceived(Update update) {
         if (update.hasMessage()) {
             Message message = update.getMessage();
+
+            if (message.getText().equals("/description")) {
+                SendMessage sendMessage = new SendMessage();
+                sendMessage.setChatId(update.getMessage().getChatId());
+                sendMessage.setText(DESCRIPTION);
+                sendMessage.setParseMode(ParseMode.HTML);
+                execute(sendMessage);
+                return;
+            }
+
             if (userRepository.existsByChatId(message.getChatId()) && userRepository.getAcceptedByChatId(message.getChatId())) {
                 List<SendMessage> sendMessageList = handleIncomingMessage(message.getChatId(), message);
 
@@ -65,8 +101,7 @@ public class Bot extends TelegramLongPollingBot {
                 }
             } else {
                 saveNewUser(message);
-                execute(prepareSendMessage(message.getChatId(),
-                        List.of("Закрытый бот. Пишите @tony_chem для получения доступа."), null));
+                execute(prepareSendMessage(message.getChatId(), List.of("Закрытый бот. Пишите @tony_chem для получения доступа."), null));
             }
         } else if (update.hasCallbackQuery()) {
             EditMessageText text = handleCallBackQuery(update.getCallbackQuery());
@@ -100,8 +135,7 @@ public class Bot extends TelegramLongPollingBot {
             List<String> reagentInfo = new ArrayList<>();
 
             for (Reagent r : paginate(userQueryResultList, REAGENTS_ON_PAGE, page)) {
-                reagentInfo.add(String.format(REAGENT_INFO_MESSAGE_ONE_NAME, r.getName(), r.getRoom(),
-                        r.getShed(), r.getShelf()));
+                reagentInfo.add(String.format(REAGENT_INFO_MESSAGE_ONE_NAME, r.getName(), r.getRoom(), r.getShed(), r.getShelf()));
             }
 
             editMessageText.setText(String.join("\n\n", reagentInfo));
@@ -110,9 +144,7 @@ public class Bot extends TelegramLongPollingBot {
         return editMessageText;
     }
 
-    private List<SendMessage> handleIncomingMessage(long chatId, Message message)
-            throws InvalidFileIdException, UnrecognizedRequestException,
-            TelegramApiException, IOException {
+    private List<SendMessage> handleIncomingMessage(long chatId, Message message) throws InvalidFileIdException, UnrecognizedRequestException, TelegramApiException, IOException {
 
         List<SendMessage> sendMessageList = new ArrayList<>();
         List<Reagent> foundReagents;
@@ -145,8 +177,7 @@ public class Bot extends TelegramLongPollingBot {
 
         //подготавливаем список строк с реактивами
         for (Reagent r : paginate(foundReagents, REAGENTS_ON_PAGE, 1)) {
-            String messageText = String.format(REAGENT_INFO_MESSAGE_ONE_NAME, r.getName(), r.getRoom(),
-                    r.getShed(), r.getShelf());
+            String messageText = String.format(REAGENT_INFO_MESSAGE_ONE_NAME, r.getName(), r.getRoom(), r.getShed(), r.getShelf());
             messagesList.add(messageText);
         }
 
@@ -170,8 +201,7 @@ public class Bot extends TelegramLongPollingBot {
         return message;
     }
 
-    private java.io.File saveImageFromPicture(Message message)
-            throws InvalidFileIdException, TelegramApiException {
+    private java.io.File saveImageFromPicture(Message message) throws InvalidFileIdException, TelegramApiException {
 
         List<PhotoSize> params = message.getPhoto();
         Optional<String> fileId = Optional.empty();
@@ -182,13 +212,11 @@ public class Bot extends TelegramLongPollingBot {
         getFile.setFileId(fileId.orElseThrow(() -> new InvalidFileIdException("Ошибка при извлечении File Id.")));
 
         File file = execute(getFile);
-        java.io.File savedFile = downloadFile(file, new java.io.File("cache/" +
-                message.getChat().getFirstName() + "_" + Instant.now().toEpochMilli() + ".jpg"));
+        java.io.File savedFile = downloadFile(file, new java.io.File("cache/" + message.getChat().getFirstName() + "_" + Instant.now().toEpochMilli() + ".jpg"));
         return savedFile;
     }
 
-    private java.io.File saveImageFromDocument(Message message) throws UnsupportedFileExtensionException,
-            TelegramApiException {
+    private java.io.File saveImageFromDocument(Message message) throws UnsupportedFileExtensionException, TelegramApiException {
 
         Document doc = message.getDocument();
 
@@ -204,11 +232,9 @@ public class Bot extends TelegramLongPollingBot {
         java.io.File ioFile = null;
 
         if (doc.getMimeType().equals("image/png")) {
-            ioFile = downloadFile(file, new java.io.File("cache/" + message.getChat().getFirstName()
-                    + "_" + Instant.now().toEpochMilli() + ".png"));
+            ioFile = downloadFile(file, new java.io.File("cache/" + message.getChat().getFirstName() + "_" + Instant.now().toEpochMilli() + ".png"));
         } else if (doc.getMimeType().equals("image/jpeg")) {
-            ioFile = downloadFile(file, new java.io.File("cache/" + message.getChat().getFirstName()
-                    + "_" + Instant.now().toEpochMilli() + ".jpg"));
+            ioFile = downloadFile(file, new java.io.File("cache/" + message.getChat().getFirstName() + "_" + Instant.now().toEpochMilli() + ".jpg"));
         }
 
         if (ioFile == null) {
@@ -264,12 +290,9 @@ public class Bot extends TelegramLongPollingBot {
                 List<InlineKeyboardButton> row;
 
                 if (i == numberOfRows) {
-                    row = prepareInlineKeyboardRow(MAX_INLINEKEYBOARD_BUTTONS_IN_ROW * (i - 1) + 1,
-                            numberOfButtons);
+                    row = prepareInlineKeyboardRow(MAX_INLINEKEYBOARD_BUTTONS_IN_ROW * (i - 1) + 1, numberOfButtons);
                 } else {
-                    row =
-                            prepareInlineKeyboardRow(MAX_INLINEKEYBOARD_BUTTONS_IN_ROW * (i - 1) + 1,
-                                    i * MAX_INLINEKEYBOARD_BUTTONS_IN_ROW);
+                    row = prepareInlineKeyboardRow(MAX_INLINEKEYBOARD_BUTTONS_IN_ROW * (i - 1) + 1, i * MAX_INLINEKEYBOARD_BUTTONS_IN_ROW);
                 }
                 rows.add(row);
             }
@@ -314,6 +337,12 @@ public class Bot extends TelegramLongPollingBot {
             row.add(button);
         }
         return row;
+    }
+
+    private void setCommands() throws TelegramApiException {
+        List<BotCommand> commands = new ArrayList<>();
+        commands.add(new BotCommand("/description", "Инструкция по использованию бота"));
+        execute(new SetMyCommands(commands, new BotCommandScopeDefault(), null));
     }
 
     @Override
