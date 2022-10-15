@@ -18,7 +18,7 @@ public class ChemicalVision {
      * @return smiles
      * @throws IOException
      */
-    public String parseImage(File file) throws IOException {
+    public String loadImage(File file) throws IOException {
         String mol = Molvec.ocr(file);
         IndigoObject obj = indigo.loadMolecule(mol);
         return obj.smiles();
@@ -33,7 +33,7 @@ public class ChemicalVision {
     public boolean exactMoleculeMatch(String firstMolecule, String secondMolecule) {
         IndigoObject target = indigo.loadMolecule(firstMolecule);
         IndigoObject query = indigo.loadMolecule(secondMolecule);
-        IndigoObject match = indigo.exactMatch(target, query, "NONE");
+        IndigoObject match = indigo.exactMatch(target, query, "ALL");
 
         return match != null;
     }

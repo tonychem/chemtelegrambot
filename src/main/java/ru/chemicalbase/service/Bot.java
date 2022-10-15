@@ -24,6 +24,8 @@ import ru.chemicalbase.repository.reagent.ReagentRepository;
 import ru.chemicalbase.repository.user.User;
 import ru.chemicalbase.repository.user.UserRepository;
 import ru.chemicalbase.utils.ChemicalVision;
+import ru.chemicalbase.utils.brokermodels.Request;
+import ru.chemicalbase.utils.SmilesServerBroker;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -37,7 +39,11 @@ public class Bot extends TelegramLongPollingBot {
     private final BotConfigurator config;
     private final ReagentRepository reagentRepository;
     private final UserRepository userRepository;
+    //этот объект распознает изображения с помощью Molvec NN
     private final ChemicalVision vision;
+
+    //этот объект общается с внешним сервером, использующием Decimer NN
+    private final SmilesServerBroker broker;
     //В таблицу сохраняется последний результат поиска пользователя
     private final Map<Long, List<Reagent>> userSearchResultCache = new ConcurrentHashMap<>();
 
@@ -45,7 +51,8 @@ public class Bot extends TelegramLongPollingBot {
     private final Map<Long, List<String>> userLastViewedPageCache = new ConcurrentHashMap<>();
     private static final int REAGENTS_ON_PAGE = 5;
     private static final int MAX_INLINEKEYBOARD_BUTTONS_IN_ROW = 5;
-    private static final String REAGENT_INFO_MESSAGE_ONE_NAME = "<b>➤%s</b>\nКомната: <b>%s</b>, " + "Шкаф: <b>%s</b>, полка: <b>%s</b>";
+    private static final String REAGENT_INFO_MESSAGE = "<b>➤%s</b>\nКомната: <b>%s</b>, " + "Шкаф: <b>%s</b>, полка: <b>%s</b>";
+    private static final String REAGENT_INFO_MESSAGE_SHELF_IS_NULL = "<b>➤%s</b>\nКомната: <b>%s</b>, Шкаф: <b>%s</b>";
 
     private static final String DESCRIPTION = """
             <b>Чат-бот для поиска реактивов по базе данных реактивов Баранова М.С.</b>
@@ -66,11 +73,13 @@ public class Bot extends TelegramLongPollingBot {
                
             """;
 
-    public Bot(BotConfigurator config, ReagentRepository reagentRepository, UserRepository userRepository, ChemicalVision vision) throws TelegramApiException {
+    public Bot(BotConfigurator config, ReagentRepository reagentRepository, UserRepository userRepository, ChemicalVision vision,
+               SmilesServerBroker broker) throws TelegramApiException {
         this.config = config;
         this.reagentRepository = reagentRepository;
         this.userRepository = userRepository;
         this.vision = vision;
+        this.broker = broker;
         setCommands();
     }
 
@@ -141,7 +150,7 @@ public class Bot extends TelegramLongPollingBot {
             List<String> reagentInfo = new ArrayList<>();
 
             for (Reagent r : paginate(userQueryResultList, REAGENTS_ON_PAGE, page)) {
-                reagentInfo.add(String.format(REAGENT_INFO_MESSAGE_ONE_NAME, r.getName(), r.getRoom(), r.getShed(), r.getShelf()));
+                reagentInfo.add(formatReagentMessage(r));
             }
 
             editMessageText.setText(String.join("\n\n", reagentInfo));
@@ -150,7 +159,8 @@ public class Bot extends TelegramLongPollingBot {
         return editMessageText;
     }
 
-    private List<SendMessage> handleIncomingMessage(long chatId, Message message) throws InvalidFileIdException, UnrecognizedRequestException, TelegramApiException, IOException {
+    private List<SendMessage> handleIncomingMessage(long chatId, Message message) throws InvalidFileIdException, UnrecognizedRequestException,
+            TelegramApiException, IOException, InterruptedException {
 
         List<SendMessage> sendMessageList = new ArrayList<>();
         List<Reagent> foundReagents;
@@ -158,10 +168,10 @@ public class Bot extends TelegramLongPollingBot {
         //Определить, что делать с входящим сообщением
         if (message.hasPhoto()) {
             java.io.File savedFile = saveImageFromPicture(message);
-            foundReagents = arrangeReagentListFromMoleculeFile(savedFile);
+            foundReagents = arrangeReagentListFromMoleculeFile(message.getChatId(), savedFile);
         } else if (message.hasDocument()) {
             java.io.File savedFile = saveImageFromDocument(message);
-            foundReagents = arrangeReagentListFromMoleculeFile(savedFile);
+            foundReagents = arrangeReagentListFromMoleculeFile(message.getChatId(), savedFile);
         } else if (message.hasText()) {
             String text = message.getText();
             foundReagents = reagentRepository.search(text);
@@ -183,8 +193,7 @@ public class Bot extends TelegramLongPollingBot {
 
         //подготавливаем список строк с реактивами
         for (Reagent r : paginate(foundReagents, REAGENTS_ON_PAGE, 1)) {
-            String messageText = String.format(REAGENT_INFO_MESSAGE_ONE_NAME, r.getName(), r.getRoom(), r.getShed(), r.getShelf());
-            messagesList.add(messageText);
+            messagesList.add(formatReagentMessage(r));
         }
 
         //этот же список сохраняем за пользователем, чтобы далее можно было парсить кнопку "..."
@@ -250,8 +259,11 @@ public class Bot extends TelegramLongPollingBot {
         return ioFile;
     }
 
-    private List<Reagent> arrangeReagentListFromMoleculeFile(java.io.File file) throws IOException {
-        String smiles = vision.parseImage(file);
+    private List<Reagent> arrangeReagentListFromMoleculeFile(long chatId, java.io.File file) throws IOException, InterruptedException {
+        //String smiles = vision.loadImage(file); предыдущий вариант через Molvec
+
+        //С Decimer NN, через flask python сервер
+        String smiles = broker.sendRequest(Request.of(chatId, file)).getSmiles();
         List<Reagent> reagentsWithSmiles = reagentRepository.findAllBySmilesNotNull();
         List<Reagent> foundReagents = new ArrayList<>();
 
@@ -349,6 +361,14 @@ public class Bot extends TelegramLongPollingBot {
         List<BotCommand> commands = new ArrayList<>();
         commands.add(new BotCommand("/description", "Инструкция по использованию бота"));
         execute(new SetMyCommands(commands, new BotCommandScopeDefault(), null));
+    }
+
+    private String formatReagentMessage(Reagent r) {
+        if (r.getShelf() == null) {
+            return String.format(REAGENT_INFO_MESSAGE_SHELF_IS_NULL, r.getName(), r.getRoom(), r.getShed());
+        } else {
+            return String.format(REAGENT_INFO_MESSAGE, r.getName(), r.getRoom(), r.getShed(), r.getShelf());
+        }
     }
 
     @Override
