@@ -6,6 +6,7 @@ target/
 *.properties
 database/
 cache/
+log/
 
 ### STS ###
 .apt_generated

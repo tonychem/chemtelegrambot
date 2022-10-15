@@ -2,6 +2,7 @@ package ru.chemicalbase.service;
 
 import com.epam.indigo.IndigoException;
 import lombok.SneakyThrows;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
@@ -17,6 +18,7 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKe
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import ru.chemicalbase.config.BotConfigurator;
 import ru.chemicalbase.exception.InvalidFileIdException;
+import ru.chemicalbase.exception.SmilesParsingException;
 import ru.chemicalbase.exception.UnrecognizedRequestException;
 import ru.chemicalbase.exception.UnsupportedFileExtensionException;
 import ru.chemicalbase.repository.reagent.Reagent;
@@ -24,8 +26,9 @@ import ru.chemicalbase.repository.reagent.ReagentRepository;
 import ru.chemicalbase.repository.user.User;
 import ru.chemicalbase.repository.user.UserRepository;
 import ru.chemicalbase.utils.ChemicalVision;
-import ru.chemicalbase.utils.brokermodels.Request;
 import ru.chemicalbase.utils.SmilesServerBroker;
+import ru.chemicalbase.utils.brokermodels.Request;
+import ru.chemicalbase.utils.brokermodels.Response;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -35,11 +38,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import static ru.chemicalbase.utils.Math.incrementIfContainsRemainder;
 
 @Service
+@Slf4j
 public class Bot extends TelegramLongPollingBot {
     private final BotConfigurator config;
     private final ReagentRepository reagentRepository;
     private final UserRepository userRepository;
-    //этот объект распознает изображения с помощью Molvec NN
+    //этот объект распознает изображения с помощью Molvec NN а также умеет сравнивать две молекулы по смайлс
     private final ChemicalVision vision;
 
     //этот объект общается с внешним сервером, использующием Decimer NN
@@ -73,8 +77,7 @@ public class Bot extends TelegramLongPollingBot {
                
             """;
 
-    public Bot(BotConfigurator config, ReagentRepository reagentRepository, UserRepository userRepository, ChemicalVision vision,
-               SmilesServerBroker broker) throws TelegramApiException {
+    public Bot(BotConfigurator config, ReagentRepository reagentRepository, UserRepository userRepository, ChemicalVision vision, SmilesServerBroker broker) throws TelegramApiException {
         this.config = config;
         this.reagentRepository = reagentRepository;
         this.userRepository = userRepository;
@@ -86,41 +89,61 @@ public class Bot extends TelegramLongPollingBot {
     @SneakyThrows
     @Override
     public void onUpdateReceived(Update update) {
-        if (update.hasMessage()) {
-            Message message = update.getMessage();
+        try {
+            if (update.hasMessage()) {
+                Message message = update.getMessage();
 
-            if (message.hasText()) {
-                if (message.getText().equals("/description")) {
-                    SendMessage sendMessage = new SendMessage();
-                    sendMessage.setChatId(update.getMessage().getChatId());
-                    sendMessage.setText(DESCRIPTION);
-                    sendMessage.setParseMode(ParseMode.HTML);
-                    execute(sendMessage);
-                    return;
+                if (message.hasText()) {
+                    if (message.getText().equals("/description")) {
+                        SendMessage sendMessage = new SendMessage();
+                        sendMessage.setChatId(message.getChatId());
+                        sendMessage.setText(DESCRIPTION);
+                        sendMessage.setParseMode(ParseMode.HTML);
+                        execute(sendMessage);
+                        return;
+                    } else if (message.getText().startsWith("/")) {
+                        SendMessage sendMessage = new SendMessage();
+                        sendMessage.setChatId(message.getChatId());
+                        sendMessage.setText("Неизвестная команда.");
+                        sendMessage.setParseMode(ParseMode.HTML);
+                        execute(sendMessage);
+                        return;
+                    }
                 }
+
+                if (userRepository.existsByChatId(message.getChatId()) && userRepository.getAcceptedByChatId(message.getChatId())) {
+                    List<SendMessage> sendMessageList = handleIncomingMessage(message.getChatId(), message);
+
+                    if (sendMessageList.isEmpty()) {
+                        execute(prepareSendMessage(message.getChatId(), List.of("Реактив не найден."), null));
+                        return;
+                    }
+
+                    for (SendMessage s : sendMessageList) {
+                        execute(s);
+                    }
+                } else {
+                    saveNewUser(message);
+                    execute(prepareSendMessage(message.getChatId(), List.of("Закрытый бот. Пишите @tony_chem для получения доступа."), null));
+                }
+
+            } else if (update.hasCallbackQuery()) {
+                EditMessageText text = handleCallBackQuery(update.getCallbackQuery());
+                execute(text);
             }
-
-
-            if (userRepository.existsByChatId(message.getChatId()) && userRepository.getAcceptedByChatId(message.getChatId())) {
-                List<SendMessage> sendMessageList = handleIncomingMessage(message.getChatId(), message);
-
-                if (sendMessageList.isEmpty()) {
-                    execute(prepareSendMessage(message.getChatId(), List.of("Реактив не найден."), null));
-                    return;
-                }
-
-                for (SendMessage s : sendMessageList) {
-                    execute(s);
-                }
-            } else {
-                saveNewUser(message);
-                execute(prepareSendMessage(message.getChatId(), List.of("Закрытый бот. Пишите @tony_chem для получения доступа."), null));
-            }
-
-
-        } else if (update.hasCallbackQuery()) {
-            EditMessageText text = handleCallBackQuery(update.getCallbackQuery());
-            execute(text);
+        } catch (UnrecognizedRequestException requestException) {
+            execute(prepareSendMessage(update.getMessage().getChatId(), List.of("Неизвестный запрос"), null));
+            log.warn(requestException.getMessage());
+        } catch (InvalidFileIdException | IOException exc) {
+            log.warn(exc.toString());
+        } catch (UnsupportedFileExtensionException fileExtensionException) {
+            execute(prepareSendMessage(update.getMessage().getChatId(), List.of("Неподдерживаемое расширение документа"), null));
+            log.warn(fileExtensionException.getMessage());
+        } catch (SmilesParsingException parsingException) {
+            execute(prepareSendMessage(update.getMessage().getChatId(), List.of("Ошибка при парсинге изображения"), null));
+            log.warn(parsingException.getMessage());
+        } catch (InterruptedException | TelegramApiException exc) {
+            log.warn(exc.toString());
         }
     }
 
@@ -159,8 +182,7 @@ public class Bot extends TelegramLongPollingBot {
         return editMessageText;
     }
 
-    private List<SendMessage> handleIncomingMessage(long chatId, Message message) throws InvalidFileIdException, UnrecognizedRequestException,
-            TelegramApiException, IOException, InterruptedException {
+    private List<SendMessage> handleIncomingMessage(long chatId, Message message) throws InvalidFileIdException, UnrecognizedRequestException, TelegramApiException, IOException, InterruptedException {
 
         List<SendMessage> sendMessageList = new ArrayList<>();
         List<Reagent> foundReagents;
@@ -176,7 +198,7 @@ public class Bot extends TelegramLongPollingBot {
             String text = message.getText();
             foundReagents = reagentRepository.search(text);
         } else {
-            throw new UnrecognizedRequestException("Неизвестный запрос.");
+            throw new UnrecognizedRequestException("Неизвестный запрос. chat_id = " + chatId);
         }
 
         //Если список реактивов пуст, возвращаем пустой список
@@ -224,7 +246,7 @@ public class Bot extends TelegramLongPollingBot {
             fileId = Optional.of(param.getFileId());
         }
         GetFile getFile = new GetFile();
-        getFile.setFileId(fileId.orElseThrow(() -> new InvalidFileIdException("Ошибка при извлечении File Id.")));
+        getFile.setFileId(fileId.orElseThrow(() -> new InvalidFileIdException("Ошибка при извлечении File Id. chat_id = " + message.getChatId())));
 
         File file = execute(getFile);
         java.io.File savedFile = downloadFile(file, new java.io.File("cache/" + message.getChat().getFirstName() + "_" + Instant.now().toEpochMilli() + ".jpg"));
@@ -253,17 +275,23 @@ public class Bot extends TelegramLongPollingBot {
         }
 
         if (ioFile == null) {
-            throw new UnsupportedFileExtensionException("Тип файла не поддерживается.");
+            throw new UnsupportedFileExtensionException("Тип файла не поддерживается. chat_id = " + message.getChatId());
         }
 
         return ioFile;
     }
 
-    private List<Reagent> arrangeReagentListFromMoleculeFile(long chatId, java.io.File file) throws IOException, InterruptedException {
+    //Формирует список реактивов на основе входящего файла
+    private List<Reagent> arrangeReagentListFromMoleculeFile(long chatId, java.io.File file) throws IOException, InterruptedException, SmilesParsingException {
         //String smiles = vision.loadImage(file); предыдущий вариант через Molvec
 
         //С Decimer NN, через flask python сервер
-        String smiles = broker.sendRequest(Request.of(chatId, file)).getSmiles();
+        Response resp = broker.sendRequest(Request.of(chatId, file));
+        if (resp.getSmiles() == null) {
+            throw new SmilesParsingException("Ошибка при парсинге изображения. chat_id = " + chatId + "; file_location = " + file.getAbsolutePath());
+        }
+        String smiles = resp.getSmiles();
+
         List<Reagent> reagentsWithSmiles = reagentRepository.findAllBySmilesNotNull();
         List<Reagent> foundReagents = new ArrayList<>();
 
@@ -279,6 +307,7 @@ public class Bot extends TelegramLongPollingBot {
         return foundReagents;
     }
 
+    //Если пользователь написал сообщение впервые, то заносится в базу данных с неподтвержденным статусом
     private void saveNewUser(Message message) {
         User user = new User();
         user.setChatId(message.getChatId());
@@ -363,6 +392,7 @@ public class Bot extends TelegramLongPollingBot {
         execute(new SetMyCommands(commands, new BotCommandScopeDefault(), null));
     }
 
+    //Формирует выводимые сообщения в зависимости от наличия данных в базе реактивов
     private String formatReagentMessage(Reagent r) {
         if (r.getShelf() == null) {
             return String.format(REAGENT_INFO_MESSAGE_SHELF_IS_NULL, r.getName(), r.getRoom(), r.getShed());

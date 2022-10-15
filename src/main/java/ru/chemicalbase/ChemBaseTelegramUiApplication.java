@@ -9,5 +9,4 @@ public class ChemBaseTelegramUiApplication {
     public static void main(String[] args) {
         SpringApplication.run(ChemBaseTelegramUiApplication.class, args);
     }
-
 }
