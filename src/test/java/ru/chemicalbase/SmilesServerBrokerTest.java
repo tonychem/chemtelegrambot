@@ -31,4 +31,5 @@ public class SmilesServerBrokerTest {
         assertThat(resp.getError()).isNull();
         assertThat(resp.getChatId()).isEqualTo(1234l);
     }
+
 }

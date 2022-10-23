@@ -33,6 +33,10 @@ public class ChemicalVision {
     public boolean exactMoleculeMatch(String firstMolecule, String secondMolecule) {
         IndigoObject target = indigo.loadMolecule(firstMolecule);
         IndigoObject query = indigo.loadMolecule(secondMolecule);
+
+        target.aromatize();
+        query.aromatize();
+
         IndigoObject match = indigo.exactMatch(target, query, "ALL");
 
         return match != null;

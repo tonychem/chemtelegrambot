@@ -16,4 +16,12 @@ public class ChemicalVisionTest {
 
         assertThat(vision.exactMoleculeMatch(smilesFromDatabase, smilesFromNeuralNetwork)).isFalse();
     }
+
+    @Test
+    public void fluorobenzeneTest() {
+        String smilesFromDatabase = "FC1=C(C=O)C=CC=C1";
+        String smilesFromNeuralNetwork = "C1=CC=C(C(=C1)C=O)F";
+
+        assertThat(vision.exactMoleculeMatch(smilesFromDatabase, smilesFromNeuralNetwork)).isTrue();
+    }
 }
